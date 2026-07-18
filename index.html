@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Winter Ball · Einlass-Scanner</title>
+<style>
+  :root{
+    --bg-1:#0a0e1a; --bg-2:#131c30;
+    --glass:rgba(255,255,255,0.07); --glass-border:rgba(255,255,255,0.14);
+    --text:#eef2fb; --text-dim:#9aa7c2;
+    --success:#7fe0a8; --error:#ff8080; --warn:#ffd27f;
+    --radius:18px; --radius-sm:12px;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  body{
+    font-family:'Segoe UI',system-ui,sans-serif;
+    background:linear-gradient(180deg,var(--bg-1),var(--bg-2));
+    color:var(--text); min-height:100vh; display:flex; flex-direction:column; align-items:center;
+    padding:20px 16px;
+  }
+  h1{font-weight:300; font-size:20px; margin-bottom:16px; text-align:center;}
+  .login-card{
+    max-width:340px; margin-top:60px; padding:28px;
+    background:var(--glass); border:1px solid var(--glass-border); border-radius:var(--radius);
+    text-align:center; backdrop-filter:blur(20px);
+  }
+  .login-card input{
+    width:100%; padding:12px 14px; margin-top:12px; background:rgba(255,255,255,0.05);
+    border:1px solid var(--glass-border); border-radius:var(--radius-sm); color:var(--text); font-size:14px;
+  }
+  .login-card button{
+    width:100%; margin-top:14px; padding:12px; border:none; border-radius:var(--radius-sm);
+    background:#8fb4ff; color:#0a0e1a; font-weight:600; cursor:pointer;
+  }
+  #reader{
+    width:100%; max-width:380px; border-radius:var(--radius); overflow:hidden;
+    border:1px solid var(--glass-border);
+  }
+  .result-card{
+    width:100%; max-width:380px; margin-top:18px; padding:22px;
+    background:var(--glass); border:1px solid var(--glass-border); border-radius:var(--radius);
+    text-align:center; display:none; backdrop-filter:blur(20px);
+  }
+  .result-card.show{display:block;}
+  .result-card.valid{border-color:rgba(127,224,168,0.5);}
+  .result-card.used{border-color:rgba(255,210,127,0.5);}
+  .result-card.invalid{border-color:rgba(255,128,128,0.5);}
+  .result-icon{font-size:36px; margin-bottom:8px;}
+  .result-name{font-size:20px; font-weight:500; margin-bottom:4px;}
+  .result-sub{font-size:13px; color:var(--text-dim);}
+  #dashboardArea{display:none; width:100%; align-items:center; flex-direction:column;}
+</style>
+</head>
+<body>
+
+<div class="login-card" id="loginCard">
+  <h1>Scanner Login</h1>
+  <input type="email" id="loginEmail" placeholder="E-Mail">
+  <input type="password" id="loginPass" placeholder="Passwort">
+  <button id="loginBtn">Anmelden</button>
+</div>
+
+<div id="dashboardArea">
+  <h1>Einlass-Check</h1>
+  <div id="reader"></div>
+  <div class="result-card" id="resultCard">
+    <div class="result-icon" id="resultIcon"></div>
+    <div class="result-name" id="resultName"></div>
+    <div class="result-sub" id="resultSub"></div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
+  import { getFirestore, collection, query, where, getDocs, updateDoc, doc } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+  import { getAuth, signInWithEmailAndPassword, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+
+  // TODO: gleiche Firebase-Config wie in index.html
+  const firebaseConfig = {
+    apiKey: "AIzaSyDQaRxga3bFrNkyU6E_sQpp5_0G4ApInOg",
+    authDomain: "winterball-27.firebaseapp.com",
+    projectId: "winterball-27",
+    storageBucket: "winterball-27.firebasestorage.app",
+    messagingSenderId: "487160103602",
+    appId: "1:487160103602:web:961a10f85bfdf77d3f7fab"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getFirestore(app);
+  const auth = getAuth(app);
+
+  onAuthStateChanged(auth, (user) => {
+    document.getElementById('loginCard').style.display = user ? 'none' : 'block';
+    document.getElementById('dashboardArea').style.display = user ? 'flex' : 'none';
+    if(user) startScanner();
+  });
+
+  document.getElementById('loginBtn').addEventListener('click', async () => {
+    const email = document.getElementById('loginEmail').value;
+    const pass = document.getElementById('loginPass').value;
+    try { await signInWithEmailAndPassword(auth, email, pass); }
+    catch(e){ alert('Login fehlgeschlagen'); }
+  });
+
+  let scanning = true;
+
+  function startScanner(){
+    const qrScanner = new Html5Qrcode("reader");
+    qrScanner.start(
+      { facingMode: "environment" },
+      { fps: 10, qrbox: 240 },
+      async (decodedText) => {
+        if(!scanning) return;
+        scanning = false;
+        await handleScan(decodedText.trim());
+        setTimeout(() => { scanning = true; }, 2500);
+      },
+      () => {}
+    );
+  }
+
+  async function handleScan(ticketId){
+    const card = document.getElementById('resultCard');
+    const icon = document.getElementById('resultIcon');
+    const name = document.getElementById('resultName');
+    const sub = document.getElementById('resultSub');
+
+    const q = query(collection(db, 'tickets'), where('ticketId', '==', ticketId));
+    const snap = await getDocs(q);
+
+    if(snap.empty){
+      card.className = 'result-card show invalid';
+      icon.textContent = '❌';
+      name.textContent = 'Ungültiges Ticket';
+      sub.textContent = ticketId;
+      return;
+    }
+
+    const docSnap = snap.docs[0];
+    const data = docSnap.data();
+
+    if(!data.paid){
+      card.className = 'result-card show invalid';
+      icon.textContent = '💰';
+      name.textContent = data.name;
+      sub.textContent = 'Noch nicht bezahlt — bitte zur Kasse schicken';
+      return;
+    }
+
+    if(data.checkedIn){
+      card.className = 'result-card show used';
+      icon.textContent = '⚠️';
+      name.textContent = data.name;
+      sub.textContent = 'Bereits eingecheckt';
+      return;
+    }
+
+    await updateDoc(doc(db, 'tickets', docSnap.id), { checkedIn: true });
+    card.className = 'result-card show valid';
+    icon.textContent = '✅';
+    name.textContent = data.name;
+    sub.textContent = 'Gültig';
+  }
+</script>
+</body>
+</html>
