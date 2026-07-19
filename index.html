@@ -71,13 +71,14 @@
     <div class="result-name" id="resultName"></div>
     <div class="result-sub" id="resultSub"></div>
   </div>
+  <button id="logoutBtn" style="margin-top:16px; padding:8px 16px; border-radius:10px; border:1px solid var(--glass-border); background:rgba(255,255,255,0.05); color:var(--text); font-size:12px; cursor:pointer;">Logout</button>
 </div>
 
 <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
   import { getFirestore, collection, query, where, getDocs, updateDoc, doc } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
-  import { getAuth, signInWithEmailAndPassword, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+  import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 
   // TODO: gleiche Firebase-Config wie in index.html
   const firebaseConfig = {
@@ -106,7 +107,26 @@
     catch(e){ alert('Login fehlgeschlagen'); }
   });
 
+  document.getElementById('logoutBtn').addEventListener('click', () => signOut(auth));
+
   let scanning = true;
+
+  function playCheckSound(){
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(880, ctx.currentTime);
+      osc.frequency.setValueAtTime(1320, ctx.currentTime + 0.1);
+      gain.gain.setValueAtTime(0.2, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.25);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.25);
+    } catch(e){ /* Audio nicht verfügbar, einfach ignorieren */ }
+  }
 
   function startScanner(){
     const qrScanner = new Html5Qrcode("reader");
@@ -168,6 +188,7 @@
     icon.textContent = '✅';
     name.textContent = data.name;
     sub.textContent = 'Gültig';
+    playCheckSound();
   }
 </script>
 </body>
