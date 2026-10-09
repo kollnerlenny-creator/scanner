@@ -36,7 +36,21 @@
   }
   #reader{
     width:100%; max-width:380px; border-radius:var(--radius); overflow:hidden;
-    border:1px solid var(--glass-border);
+    border:1px solid var(--glass-border); background:#000;
+  }
+  #reader video{
+    border-radius:var(--radius);
+    object-fit:cover;
+  }
+  .camera-control-box{
+    width:100%; max-width:380px; margin-bottom:12px;
+    background:rgba(255,255,255,0.04); border:1px solid var(--glass-border);
+    border-radius:12px; padding:8px 12px;
+  }
+  .camera-select{
+    width:100%; background:rgba(19,28,48,0.85); border:1px solid var(--glass-border);
+    border-radius:8px; color:var(--text); padding:8px 10px; font-size:13px;
+    outline:none; cursor:pointer; appearance:auto;
   }
   .result-card{
     width:100%; max-width:380px; margin-top:18px; padding:22px;
@@ -75,6 +89,15 @@
 <div id="dashboardArea">
   <h1>Einlass-Check</h1>
   <div class="conn-badge" id="connBadge"><span class="conn-dot" id="connDot"></span><span id="connText">Online</span></div>
+
+  <!-- Kamera-Auswahl (automatisch auf 1x Hauptkamera gestellt, manuell umschaltbar) -->
+  <div class="camera-control-box" id="cameraControlBox" style="display:none;">
+    <div style="display:flex; align-items:center; gap:8px;">
+      <span style="font-size:12px; color:var(--text-dim); white-space:nowrap;">📷 Kamera:</span>
+      <select id="cameraSelect" class="camera-select" aria-label="Kamera auswählen"></select>
+    </div>
+  </div>
+
   <div id="reader"></div>
   <div class="result-card" id="resultCard">
     <div class="result-icon" id="resultIcon"></div>
@@ -93,7 +116,7 @@
   } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
   import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 
-  // TODO: gleiche Firebase-Config wie in index.html
+  // gleiche Firebase-Config wie in index.html
   const firebaseConfig = {
     apiKey: "AIzaSyDQaRxga3bFrNkyU6E_sQpp5_0G4ApInOg",
     authDomain: "winterball-27.firebaseapp.com",
@@ -105,19 +128,12 @@
 
   const app = initializeApp(firebaseConfig);
 
-  // Persistenter Offline-Cache (IndexedDB): die komplette Ticket-Liste wird lokal
-  // im Browser gespeichert. Fällt das Internet aus, kann trotzdem gegen diesen
-  // Cache geprüft werden, und ein Check-in-Schreibvorgang landet automatisch in
-  // Firestores eigener Warteschlange und wird nachgeschickt, sobald wieder Netz da
-  // ist — dafür ist keine eigene Sync-Logik nötig.
+  // Persistenter Offline-Cache (IndexedDB)
   const db = initializeFirestore(app, {
     localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() })
   });
   const auth = getAuth(app);
 
-  // Komplette Ticket-Liste einmal live laden (wird von Firestore automatisch im
-  // Cache gehalten) — der Scanner prüft danach lokal gegen "allTickets", statt bei
-  // jedem Scan eine eigene Anfrage an den Server zu schicken.
   let allTickets = [];
   onSnapshot(collection(db, 'tickets'), (snap) => {
     allTickets = snap.docs.map(d => ({ id: d.id, ...d.data() }));
@@ -136,7 +152,12 @@
     catch(e){ alert('Login fehlgeschlagen'); }
   });
 
-  document.getElementById('logoutBtn').addEventListener('click', () => signOut(auth));
+  document.getElementById('logoutBtn').addEventListener('click', () => {
+    if (qrScannerInstance) {
+      qrScannerInstance.stop().catch(() => {});
+    }
+    signOut(auth);
+  });
 
   function updateConnBadge(){
     const online = navigator.onLine;
@@ -149,6 +170,9 @@
   updateConnBadge();
 
   let scanning = true;
+  let qrScannerInstance = null;
+  let activeCameraId = null;
+  let availableCameras = [];
 
   function playCheckSound(){
     try {
@@ -164,25 +188,156 @@
       gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.25);
       osc.start();
       osc.stop(ctx.currentTime + 0.25);
-    } catch(e){ /* Audio nicht verfügbar, einfach ignorieren */ }
+    } catch(e){ /* Audio nicht verfügbar */ }
   }
 
-  function startScanner(){
+  // Wählt gezielt die normale 1x Hauptkamera aus und filtert Weitwinkel-/Ultra-Wide-Kameras heraus
+  function pickNormalCamera(cameras) {
+    if (!cameras || cameras.length === 0) return null;
+
+    // Gespeichertes Wunsch-Gerät aus Vorbesuch nutzen, falls vorhanden
+    const saved = localStorage.getItem('wb_scanner_camera');
+    if (saved && cameras.some(c => c.id === saved)) {
+      return saved;
+    }
+
+    const isFront = (l) => /front|user|selfie|vorne/i.test(l);
+    // Ultra-Wide / Weitwinkel / 0.5x aussortieren
+    const isUltra = (l) => /ultra|0\.5|weitwinkel|tele|macro|virtual|depth/i.test(l);
+
+    const backCams = cameras.filter(c => !isFront(c.label));
+    const normalBackCams = backCams.filter(c => !isUltra(c.label));
+
+    if (normalBackCams.length > 0) {
+      const preferred = normalBackCams.find(c => /main|primary|standard|1x/i.test(c.label)) || normalBackCams[0];
+      return preferred.id;
+    }
+
+    if (backCams.length > 0) return backCams[0].id;
+    return cameras[0].id;
+  }
+
+  // Bereitet das Dropdown-Menü zur Kameraauswahl vor
+  function updateCameraDropdown(cameras, selectedId) {
+    const box = document.getElementById('cameraControlBox');
+    const select = document.getElementById('cameraSelect');
+    if (!cameras || cameras.length <= 1) {
+      box.style.display = 'none';
+      return;
+    }
+
+    select.innerHTML = '';
+    cameras.forEach(cam => {
+      const opt = document.createElement('option');
+      opt.value = cam.id;
+      let label = cam.label || `Kamera (${cam.id.slice(0, 6)}...)`;
+      if (/ultra|0\.5|weitwinkel/i.test(label)) {
+        label = `🔭 Weitwinkel: ${label}`;
+      } else if (!/front|user|selfie/i.test(label)) {
+        label = `📸 Hauptkamera (1x): ${label}`;
+      }
+      opt.textContent = label;
+      if (cam.id === selectedId) opt.selected = true;
+      select.appendChild(opt);
+    });
+
+    box.style.display = 'block';
+
+    select.onchange = async () => {
+      const newId = select.value;
+      localStorage.setItem('wb_scanner_camera', newId);
+      await startScanner(newId);
+    };
+  }
+
+  async function startScanner(targetCamId = null){
+    if (qrScannerInstance) {
+      try {
+        await qrScannerInstance.stop();
+      } catch(e) {}
+    }
+
     const qrScanner = new Html5Qrcode("reader");
-    qrScanner.start(
-      { facingMode: "environment" },
-      { fps: 10, qrbox: 240 },
-      async (decodedText) => {
-        if(!scanning) return;
-        scanning = false;
-        await handleScan(decodedText.trim());
-        setTimeout(() => {
-          document.getElementById('resultCard').classList.add('hide');
-        }, 1800);
-        setTimeout(() => { scanning = true; }, 2500);
-      },
-      () => {}
-    );
+    qrScannerInstance = qrScanner;
+
+    try {
+      const cameras = await Html5Qrcode.getCameras().catch(() => []);
+      availableCameras = cameras;
+
+      let chosenId = targetCamId;
+      if (!chosenId) {
+        chosenId = pickNormalCamera(cameras);
+      }
+      activeCameraId = chosenId;
+
+      const cameraConfig = chosenId ? chosenId : { facingMode: "environment" };
+
+      await qrScanner.start(
+        cameraConfig,
+        {
+          fps: 10,
+          qrbox: { width: 250, height: 250 },
+          aspectRatio: 1.0
+        },
+        async (decodedText) => {
+          if(!scanning) return;
+          scanning = false;
+          await handleScan(decodedText.trim());
+          setTimeout(() => {
+            document.getElementById('resultCard').classList.add('hide');
+          }, 1800);
+          setTimeout(() => { scanning = true; }, 2500);
+        },
+        () => {}
+      );
+
+      // Kameras nach Berechtigungserteilung mit echten Bezeichnungen laden
+      if (!availableCameras || availableCameras.length <= 1 || !availableCameras[0].label) {
+        Html5Qrcode.getCameras().then(freshCams => {
+          availableCameras = freshCams;
+          updateCameraDropdown(freshCams, activeCameraId);
+        }).catch(() => {});
+      } else {
+        updateCameraDropdown(availableCameras, activeCameraId);
+      }
+
+      // Hardware-Zoom ausgleichen (falls Kamera hardwareseitig bei 0.5x startet)
+      try {
+        const caps = qrScanner.getRunningTrackCapabilities();
+        if (caps && caps.zoom && caps.zoom.min !== undefined) {
+          const minZ = caps.zoom.min;
+          const maxZ = caps.zoom.max;
+          if (minZ < 1.0 && maxZ >= 1.0) {
+            qrScanner.applyVideoConstraints({ advanced: [{ zoom: 1.0 }] }).catch(() => {});
+          }
+        }
+      } catch(e) {}
+
+    } catch(err) {
+      console.error('Kamera Start fehlgeschlagen:', err);
+      if (typeof targetCamId === 'string') {
+        try {
+          await qrScanner.start(
+            { facingMode: "environment" },
+            { fps: 10, qrbox: { width: 250, height: 250 } },
+            async (decodedText) => {
+              if(!scanning) return;
+              scanning = false;
+              await handleScan(decodedText.trim());
+              setTimeout(() => {
+                document.getElementById('resultCard').classList.add('hide');
+              }, 1800);
+              setTimeout(() => { scanning = true; }, 2500);
+            },
+            () => {}
+          );
+        } catch(e2) {
+          alert('Kamera konnte nicht gestartet werden: ' + (e2.message || err.message));
+        }
+      } else {
+        alert('Kamera-Fehler: ' + (err.message || err));
+      }
+    }
   }
 
   async function handleScan(ticketId){
@@ -192,8 +347,6 @@
     const sub = document.getElementById('resultSub');
     card.classList.remove('hide');
 
-    // Lokale Suche im (von Firestore automatisch im Browser-Cache gehaltenen)
-    // Ticket-Bestand — funktioniert auch komplett offline.
     const ticket = allTickets.find(t => t.ticketId === ticketId);
 
     if(!ticket){
@@ -220,9 +373,6 @@
       return;
     }
 
-    // Lokal sofort als eingecheckt markieren (optimistisch), damit ein zweiter
-    // Scan desselben Tickets sofort als "bereits eingecheckt" erkannt wird, auch
-    // bevor der Schreibvorgang synchronisiert wurde (z.B. offline).
     ticket.checkedIn = true;
 
     card.className = 'result-card show valid';
@@ -233,8 +383,6 @@
 
     try {
       await updateDoc(doc(db, 'tickets', ticket.id), { checkedIn: true });
-      // Ist gerade kein Internet da, löst dieses await erst auf, sobald wieder
-      // synchronisiert wurde — Firestore kümmert sich selbst um die Warteschlange.
     } catch(err){
       console.error('Check-in konnte nicht gespeichert werden:', err);
     }
